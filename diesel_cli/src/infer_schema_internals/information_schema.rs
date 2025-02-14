@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::error::Error;
 
 use diesel::backend::Backend;
 use diesel::connection::LoadConnection;
@@ -32,7 +31,10 @@ impl DefaultSchema for Pg {
 }
 
 #[cfg(feature = "mysql")]
-sql_function!(fn database() -> VarChar);
+#[diesel::declare_sql_function]
+extern "SQL" {
+    fn database() -> VarChar;
+}
 
 #[cfg(feature = "mysql")]
 impl DefaultSchema for Mysql {
@@ -141,7 +143,7 @@ where
 pub fn load_table_names<'a, Conn>(
     connection: &mut Conn,
     schema_name: Option<&'a str>,
-) -> Result<Vec<TableName>, Box<dyn Error + Send + Sync + 'static>>
+) -> Result<Vec<TableName>, crate::errors::Error>
 where
     Conn: LoadConnection,
     Conn::Backend: DefaultSchema + 'static,

@@ -1,4 +1,3 @@
-#![feature(diagnostic_namespace)]
 extern crate diesel;
 
 use diesel::prelude::*;
@@ -24,6 +23,13 @@ struct User {
 struct UserCorrect {
     id: i32,
     name: String,
+}
+
+#[derive(Selectable, Queryable)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+struct SelectableWithEmbed {
+    #[diesel(embed)]
+    embed_user: User,
 }
 
 fn main() {

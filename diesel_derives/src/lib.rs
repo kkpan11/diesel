@@ -23,6 +23,7 @@ extern crate quote;
 extern crate syn;
 
 use proc_macro::TokenStream;
+use sql_function::ExternSqlBlock;
 use syn::{parse_macro_input, parse_quote};
 
 mod attrs;
@@ -62,6 +63,11 @@ mod valid_grouping;
 /// from the name of the corresponding column, you can annotate the field with
 /// `#[diesel(column_name = some_column_name)]`.
 ///
+/// Your struct can also contain fields which implement `AsChangeset`. This is
+/// useful when you want to have one field map to more than one column (for
+/// example, an enum that maps to a label and a value column). Add
+/// `#[diesel(embed)]` to any such fields.
+///
 /// To provide custom serialization behavior for a field, you can use
 /// `#[diesel(serialize_as = SomeType)]`. If this attribute is present, Diesel
 /// will call `.into` on the corresponding field and serialize the instance of `SomeType`,
@@ -98,12 +104,16 @@ mod valid_grouping;
 /// * `#[diesel(column_name = some_column_name)]`, overrides the column name
 ///    of the current field to `some_column_name`. By default, the field
 ///    name is used as column name.
+/// * `#[diesel(embed)]`, specifies that the current field maps not only
+///    to a single database field, but is a struct that implements `AsChangeset`.
 /// * `#[diesel(serialize_as = SomeType)]`, instead of serializing the actual
 ///    field type, Diesel will convert the field into `SomeType` using `.into` and
 ///    serialize that instead. By default, this derive will serialize directly using
 ///    the actual field type.
 /// * `#[diesel(treat_none_as_null = true/false)]`, overrides the container-level
 ///   `treat_none_as_null` attribute for the current field.
+/// * `#[diesel(skip_update)]`, skips updating this field. Useful for working with
+///    generated columns.
 #[cfg_attr(
     all(not(feature = "without-deprecated"), feature = "with-deprecated"),
     proc_macro_derive(
@@ -135,6 +145,8 @@ pub fn derive_as_changeset(input: TokenStream) -> TokenStream {
 /// If your type is unsized,
 /// you can specify this by adding the annotation `#[diesel(not_sized)]`
 /// as attribute on the type. This will skip the impls for non-reference types.
+///
+/// Using this derive requires implementing the `ToSql` trait for your type.
 ///
 /// # Attributes:
 ///
@@ -216,7 +228,7 @@ pub fn derive_diesel_numeric_ops(input: TokenStream) -> TokenStream {
     diesel_numeric_ops::derive(parse_macro_input!(input)).into()
 }
 
-/// Implements `Queryable` for primitive types
+/// Implements `Queryable` for types that correspond to a single SQL type. The type must implement `FromSql`.
 ///
 /// This derive is mostly useful to implement support deserializing
 /// into rust types not supported by Diesel itself.
@@ -334,6 +346,8 @@ pub fn derive_identifiable(input: TokenStream) -> TokenStream {
 ///    the actual field type.
 /// * `#[diesel(treat_none_as_default_value = true/false)]`, overrides the container-level
 ///   `treat_none_as_default_value` attribute for the current field.
+/// * `#[diesel(skip_insertion)]`, skips insertion of this field. Useful for working with
+///    generated columns.
 ///
 /// # Examples
 ///
@@ -382,7 +396,7 @@ pub fn derive_identifiable(input: TokenStream) -> TokenStream {
 /// # fn run_test() -> QueryResult<()> {
 /// #     use schema::users::dsl::*;
 /// #     let connection = &mut connection_no_data();
-/// #     diesel::sql_query("CREATE TABLE users (id INTEGER PRIMARY KEY, name VARCHAR(255) NOT NULL)")
+/// #     diesel::sql_query("CREATE TEMPORARY TABLE users (id INTEGER PRIMARY KEY, name VARCHAR(255) NOT NULL)")
 /// #         .execute(connection)
 /// #         .unwrap();
 /// let user = InsertableUser {
@@ -463,9 +477,9 @@ pub fn derive_query_id(input: TokenStream) -> TokenStream {
 /// your struct__ matches __all fields in the query__, including the order and
 /// count. This means that field order is significant if you're using
 /// `#[derive(Queryable)]`. __Field name has no effect__. If you see errors while
-/// loading data into a struct that derives `Queryable`: Consider using [`#[derive(Selectable)]`]
-/// + `#[diesel(check_for_backend(YourBackendType))]` to check for mismatching fields at
-/// compile-time.
+/// loading data into a struct that derives `Queryable`: Consider using
+/// [`#[derive(Selectable)]`] + `#[diesel(check_for_backend(YourBackendType))]`
+/// to check for mismatching fields at compile-time.
 ///
 /// To provide custom deserialization behavior for a field, you can use
 /// `#[diesel(deserialize_as = SomeType)]`. If this attribute is present, Diesel
@@ -1002,6 +1016,10 @@ pub fn derive_valid_grouping(input: TokenStream) -> TokenStream {
 /// This macro enables you to add additional functions from the SQL standard,
 /// as well as any custom functions your application might have.
 ///
+/// This is a legacy variant of the [`#[declare_sql_function]`] attribute macro, which
+/// should be preferred instead. It will generate the same code as the attribute macro
+/// and also it will accept the same syntax as the other macro.
+///
 /// The syntax for this macro is very similar to that of a normal Rust function,
 /// except the argument and return types will be the SQL types being used.
 /// Typically, these types will come from [`diesel::sql_types`](../diesel/sql_types/index.html)
@@ -1011,46 +1029,17 @@ pub fn derive_valid_grouping(input: TokenStream) -> TokenStream {
 /// function. For example, this invocation:
 ///
 /// ```ignore
-/// sql_function!(fn lower(x: Text) -> Text);
+/// define_sql_function!(fn lower(x: Text) -> Text);
 /// ```
 ///
 /// will generate this code:
 ///
 /// ```ignore
-/// pub fn lower<X>(x: X) -> lower::HelperType<X> {
+/// pub fn lower<X>(x: X) -> lower<X> {
 ///     ...
 /// }
 ///
-/// pub(crate) mod lower {
-///     pub type HelperType<X> = ...;
-/// }
-/// ```
-///
-/// If you are using this macro for part of a library, where the function is
-/// part of your public API, it is highly recommended that you re-export this
-/// helper type with the same name as your function. This is the standard
-/// structure:
-///
-/// ```ignore
-/// pub mod functions {
-///     use super::types::*;
-///     use diesel::sql_types::*;
-///
-///     sql_function! {
-///         /// Represents the Pg `LENGTH` function used with `tsvector`s.
-///         fn length(x: TsVector) -> Integer;
-///     }
-/// }
-///
-/// pub mod helper_types {
-///     /// The return type of `length(expr)`
-///     pub type Length<Expr> = functions::length::HelperType<Expr>;
-/// }
-///
-/// pub mod dsl {
-///     pub use functions::*;
-///     pub use helper_types::*;
-/// }
+/// pub type lower<X> = ...;
 /// ```
 ///
 /// Most attributes given to this macro will be put on the generated function
@@ -1066,7 +1055,7 @@ pub fn derive_valid_grouping(input: TokenStream) -> TokenStream {
 /// #
 /// use diesel::sql_types::Text;
 ///
-/// sql_function! {
+/// define_sql_function! {
 ///     /// Represents the `canon_crate_name` SQL function, created in
 ///     /// migration ....
 ///     fn canon_crate_name(a: Text) -> Text;
@@ -1094,256 +1083,42 @@ pub fn derive_valid_grouping(input: TokenStream) -> TokenStream {
 ///     This can be used to represent functions which can take many argument
 ///     types, or to capitalize function names.
 ///
-/// Functions can also be generic. Take the definition of `sum`, for example:
-///
-/// ```no_run
-/// # extern crate diesel;
-/// # use diesel::*;
-/// #
-/// # table! { crates { id -> Integer, name -> VarChar, } }
-/// #
-/// use diesel::sql_types::Foldable;
-///
-/// sql_function! {
-///     #[aggregate]
-///     #[sql_name = "SUM"]
-///     fn sum<ST: Foldable>(expr: ST) -> ST::Sum;
-/// }
-///
-/// # fn main() {
-/// # use self::crates::dsl::*;
-/// crates.select(sum(id));
-/// # }
-/// ```
-///
-/// # SQL Functions without Arguments
-///
-/// A common example is ordering a query using the `RANDOM()` sql function,
-/// which can be implemented using `sql_function!` like this:
-///
-/// ```rust
-/// # extern crate diesel;
-/// # use diesel::*;
-/// #
-/// # table! { crates { id -> Integer, name -> VarChar, } }
-/// #
-/// sql_function!(fn random() -> Text);
-///
-/// # fn main() {
-/// # use self::crates::dsl::*;
-/// crates.order(random());
-/// # }
-/// ```
-///
-/// # Use with SQLite
-///
-/// On most backends, the implementation of the function is defined in a
-/// migration using `CREATE FUNCTION`. On SQLite, the function is implemented in
-/// Rust instead. You must call `register_impl` or
-/// `register_nondeterministic_impl` with every connection before you can use
-/// the function.
-///
-/// These functions will only be generated if the `sqlite` feature is enabled,
-/// and the function is not generic.
-/// SQLite doesn't support generic functions and variadic functions.
-///
-/// ```rust
-/// # extern crate diesel;
-/// # use diesel::*;
-/// #
-/// # #[cfg(feature = "sqlite")]
-/// # fn main() {
-/// #     run_test().unwrap();
-/// # }
-/// #
-/// # #[cfg(not(feature = "sqlite"))]
-/// # fn main() {
-/// # }
-/// #
-/// use diesel::sql_types::{Integer, Double};
-/// sql_function!(fn add_mul(x: Integer, y: Integer, z: Double) -> Double);
-///
-/// # #[cfg(feature = "sqlite")]
-/// # fn run_test() -> Result<(), Box<dyn std::error::Error>> {
-/// let connection = &mut SqliteConnection::establish(":memory:")?;
-///
-/// add_mul::register_impl(connection, |x: i32, y: i32, z: f64| {
-///     (x + y) as f64 * z
-/// })?;
-///
-/// let result = select(add_mul(1, 2, 1.5))
-///     .get_result::<f64>(connection)?;
-/// assert_eq!(4.5, result);
-/// #     Ok(())
-/// # }
-/// ```
-///
-/// ## Panics
-///
-/// If an implementation of the custom function panics and unwinding is enabled, the panic is
-/// caught and the function returns to libsqlite with an error. It can't propagate the panics due
-/// to the FFI boundary.
-///
-/// This is the same for [custom aggregate functions](#custom-aggregate-functions).
-///
-/// ## Custom Aggregate Functions
-///
-/// Custom aggregate functions can be created in SQLite by adding an `#[aggregate]`
-/// attribute inside `sql_function`. `register_impl` needs to be called on
-/// the generated function with a type implementing the
-/// [SqliteAggregateFunction](../diesel/sqlite/trait.SqliteAggregateFunction.html)
-/// trait as a type parameter as shown in the examples below.
-///
-/// ```rust
-/// # extern crate diesel;
-/// # use diesel::*;
-/// #
-/// # #[cfg(feature = "sqlite")]
-/// # fn main() {
-/// #   run().unwrap();
-/// # }
-/// #
-/// # #[cfg(not(feature = "sqlite"))]
-/// # fn main() {
-/// # }
-/// use diesel::sql_types::Integer;
-/// # #[cfg(feature = "sqlite")]
-/// use diesel::sqlite::SqliteAggregateFunction;
-///
-/// sql_function! {
-///     #[aggregate]
-///     fn my_sum(x: Integer) -> Integer;
-/// }
-///
-/// #[derive(Default)]
-/// struct MySum { sum: i32 }
-///
-/// # #[cfg(feature = "sqlite")]
-/// impl SqliteAggregateFunction<i32> for MySum {
-///     type Output = i32;
-///
-///     fn step(&mut self, expr: i32) {
-///         self.sum += expr;
-///     }
-///
-///     fn finalize(aggregator: Option<Self>) -> Self::Output {
-///         aggregator.map(|a| a.sum).unwrap_or_default()
-///     }
-/// }
-/// # table! {
-/// #     players {
-/// #         id -> Integer,
-/// #         score -> Integer,
-/// #     }
-/// # }
-///
-/// # #[cfg(feature = "sqlite")]
-/// fn run() -> Result<(), Box<dyn (::std::error::Error)>> {
-/// #    use self::players::dsl::*;
-///     let connection = &mut SqliteConnection::establish(":memory:")?;
-/// #    diesel::sql_query("create table players (id integer primary key autoincrement, score integer)")
-/// #        .execute(connection)
-/// #        .unwrap();
-/// #    diesel::sql_query("insert into players (score) values (10), (20), (30)")
-/// #        .execute(connection)
-/// #        .unwrap();
-///
-///     my_sum::register_impl::<MySum, _>(connection)?;
-///
-///     let total_score = players.select(my_sum(score))
-///         .get_result::<i32>(connection)?;
-///
-///     println!("The total score of all the players is: {}", total_score);
-///
-/// #    assert_eq!(60, total_score);
-///     Ok(())
-/// }
-/// ```
-///
-/// With multiple function arguments, the arguments are passed as a tuple to `SqliteAggregateFunction`
-///
-/// ```rust
-/// # extern crate diesel;
-/// # use diesel::*;
-/// #
-/// # #[cfg(feature = "sqlite")]
-/// # fn main() {
-/// #   run().unwrap();
-/// # }
-/// #
-/// # #[cfg(not(feature = "sqlite"))]
-/// # fn main() {
-/// # }
-/// use diesel::sql_types::{Float, Nullable};
-/// # #[cfg(feature = "sqlite")]
-/// use diesel::sqlite::SqliteAggregateFunction;
-///
-/// sql_function! {
-///     #[aggregate]
-///     fn range_max(x0: Float, x1: Float) -> Nullable<Float>;
-/// }
-///
-/// #[derive(Default)]
-/// struct RangeMax<T> { max_value: Option<T> }
-///
-/// # #[cfg(feature = "sqlite")]
-/// impl<T: Default + PartialOrd + Copy + Clone> SqliteAggregateFunction<(T, T)> for RangeMax<T> {
-///     type Output = Option<T>;
-///
-///     fn step(&mut self, (x0, x1): (T, T)) {
-/// #        let max = if x0 >= x1 {
-/// #            x0
-/// #        } else {
-/// #            x1
-/// #        };
-/// #
-/// #        self.max_value = match self.max_value {
-/// #            Some(current_max_value) if max > current_max_value => Some(max),
-/// #            None => Some(max),
-/// #            _ => self.max_value,
-/// #        };
-///         // Compare self.max_value to x0 and x1
-///     }
-///
-///     fn finalize(aggregator: Option<Self>) -> Self::Output {
-///         aggregator?.max_value
-///     }
-/// }
-/// # table! {
-/// #     student_avgs {
-/// #         id -> Integer,
-/// #         s1_avg -> Float,
-/// #         s2_avg -> Float,
-/// #     }
-/// # }
-///
-/// # #[cfg(feature = "sqlite")]
-/// fn run() -> Result<(), Box<dyn (::std::error::Error)>> {
-/// #    use self::student_avgs::dsl::*;
-///     let connection = &mut SqliteConnection::establish(":memory:")?;
-/// #    diesel::sql_query("create table student_avgs (id integer primary key autoincrement, s1_avg float, s2_avg float)")
-/// #       .execute(connection)
-/// #       .unwrap();
-/// #    diesel::sql_query("insert into student_avgs (s1_avg, s2_avg) values (85.5, 90), (79.8, 80.1)")
-/// #        .execute(connection)
-/// #        .unwrap();
-///
-///     range_max::register_impl::<RangeMax<f32>, _, _>(connection)?;
-///
-///     let result = student_avgs.select(range_max(s1_avg, s2_avg))
-///         .get_result::<Option<f32>>(connection)?;
-///
-///     if let Some(max_semester_avg) = result {
-///         println!("The largest semester average is: {}", max_semester_avg);
-///     }
-///
-/// #    assert_eq!(Some(90f32), result);
-///     Ok(())
-/// }
-/// ```
 #[proc_macro]
+pub fn define_sql_function(input: TokenStream) -> TokenStream {
+    sql_function::expand(parse_macro_input!(input), false).into()
+}
+
+/// A legacy version of [`define_sql_function!`].
+///
+/// The difference is that it makes the helper type available in a module named the exact same as
+/// the function:
+///
+/// ```ignore
+/// sql_function!(fn lower(x: Text) -> Text);
+/// ```
+///
+/// will generate this code:
+///
+/// ```ignore
+/// pub fn lower<X>(x: X) -> lower::HelperType<X> {
+///     ...
+/// }
+///
+/// pub(crate) mod lower {
+///     pub type HelperType<X> = ...;
+/// }
+/// ```
+///
+/// This turned out to be an issue for the support of the `auto_type` feature, which is why
+/// [`define_sql_function!`] was introduced (and why this is deprecated).
+///
+/// SQL functions declared with this version of the macro will not be usable with `#[auto_type]`
+/// or `Selectable` `select_expression` type inference.
+#[deprecated(since = "2.2.0", note = "Use [`define_sql_function`] instead")]
+#[proc_macro]
+#[cfg(all(feature = "with-deprecated", not(feature = "without-deprecated")))]
 pub fn sql_function_proc(input: TokenStream) -> TokenStream {
-    sql_function::expand(parse_macro_input!(input)).into()
+    sql_function::expand(parse_macro_input!(input), true).into()
 }
 
 /// This is an internal diesel macro that
@@ -1543,7 +1318,7 @@ pub fn table_proc(input: TokenStream) -> TokenStream {
     }
 }
 
-/// This derives implements [`diesel::Connection`] and related traits for an enum of
+/// This derives implements `diesel::Connection` and related traits for an enum of
 /// connections to different databases.
 ///
 /// By applying this derive to such an enum, you can use the enum as a connection type in
@@ -1552,12 +1327,12 @@ pub fn table_proc(input: TokenStream) -> TokenStream {
 /// `diesel::Connection` and a number of related traits. Connection types form Diesel itself
 /// as well as third party connection types are supported by this derive.
 ///
-/// The implementation of [`diesel::Connection::establish`] tries to establish
+/// The implementation of `diesel::Connection::establish` tries to establish
 /// a new connection with the given connection string in the order the connections
 /// are specified in the enum. If one connection fails, it tries the next one and so on.
 /// That means that as soon as more than one connection type accepts a certain connection
 /// string the first matching type in your enum will always establish the connection. This
-/// is especially important if one of the connection types is [`diesel::SqliteConnection`]
+/// is especially important if one of the connection types is `diesel::SqliteConnection`
 /// as this connection type accepts arbitrary paths. It should normally place as last entry
 /// in your enum. If you want control of which connection type is created, just construct the
 /// corresponding enum manually by first establishing the connection via the inner type and then
@@ -1628,8 +1403,99 @@ pub fn table_proc(input: TokenStream) -> TokenStream {
 /// * `diesel::sql_types::Timestamp`
 ///
 /// Support for additional types can be added by providing manual implementations of
-/// `HasSqlType`, `FromSql` and `ToSql` for the corresponding type + the generated
-/// database backend.
+/// `HasSqlType`, `FromSql` and `ToSql` for the corresponding type, all databases included
+/// in your enum, and the backend generated by this derive called `MultiBackend`.
+/// For example to support a custom enum `MyEnum` with the custom SQL type `MyInteger`:
+/// ```
+/// extern crate diesel;
+/// use diesel::backend::Backend;
+/// use diesel::deserialize::{self, FromSql, FromSqlRow};
+/// use diesel::serialize::{self, IsNull, ToSql};
+/// use diesel::AsExpression;
+/// use diesel::sql_types::{HasSqlType, SqlType};
+/// use diesel::prelude::*;
+///
+/// #[derive(diesel::MultiConnection)]
+/// pub enum AnyConnection {
+/// #   #[cfg(feature = "postgres")]
+///     Postgresql(diesel::PgConnection),
+/// #   #[cfg(feature = "mysql")]
+///     Mysql(diesel::MysqlConnection),
+/// #   #[cfg(feature = "sqlite")]
+///     Sqlite(diesel::SqliteConnection),
+/// }
+///
+/// // defining an custom SQL type is optional
+/// // you can also use types from `diesel::sql_types`
+/// #[derive(Copy, Clone, Debug, SqlType)]
+/// #[diesel(postgres_type(name = "Int4"))]
+/// #[diesel(mysql_type(name = "Long"))]
+/// #[diesel(sqlite_type(name = "Integer"))]
+/// struct MyInteger;
+///
+///
+/// // our custom enum
+/// #[repr(i32)]
+/// #[derive(Debug, Clone, Copy, AsExpression, FromSqlRow)]
+/// #[diesel(sql_type = MyInteger)]
+/// pub enum MyEnum {
+///     A = 1,
+///     B = 2,
+/// }
+///
+/// // The `MultiBackend` type is generated by `#[derive(diesel::MultiConnection)]`
+/// // This part is only required if you define a custom sql type
+/// impl HasSqlType<MyInteger> for MultiBackend {
+///    fn metadata(lookup: &mut Self::MetadataLookup) -> Self::TypeMetadata {
+///        // The `lookup_sql_type` function is exposed by the `MultiBackend` type
+///        MultiBackend::lookup_sql_type::<MyInteger>(lookup)
+///    }
+/// }
+///
+/// impl FromSql<MyInteger, MultiBackend> for MyEnum {
+///    fn from_sql(bytes: <MultiBackend as Backend>::RawValue<'_>) -> deserialize::Result<Self> {
+///        // The `from_sql` function is exposed by the `RawValue` type of the
+///        // `MultiBackend` type
+///        // This requires a `FromSql` impl for each backend
+///        bytes.from_sql::<MyEnum, MyInteger>()
+///    }
+/// }
+///
+/// impl ToSql<MyInteger, MultiBackend> for MyEnum {
+///    fn to_sql<'b>(&'b self, out: &mut serialize::Output<'b, '_, MultiBackend>) -> serialize::Result {
+///        /// `set_value` expects a tuple consisting of the target SQL type
+///        /// and self for `MultiBackend`
+///        /// This requires a `ToSql` impl for each backend
+///        out.set_value((MyInteger, self));
+///        Ok(IsNull::No)
+///    }
+/// }
+/// # #[cfg(feature = "postgres")]
+/// # impl ToSql<MyInteger, diesel::pg::Pg> for MyEnum {
+/// #    fn to_sql<'b>(&'b self, out: &mut serialize::Output<'b, '_, diesel::pg::Pg>) -> serialize::Result { todo!() }
+/// # }
+/// # #[cfg(feature = "mysql")]
+/// # impl ToSql<MyInteger, diesel::mysql::Mysql> for MyEnum {
+/// #    fn to_sql<'b>(&'b self, out: &mut serialize::Output<'b, '_, diesel::mysql::Mysql>) -> serialize::Result { todo!() }
+/// # }
+/// # #[cfg(feature = "sqlite")]
+/// # impl ToSql<MyInteger, diesel::sqlite::Sqlite> for MyEnum {
+/// #    fn to_sql<'b>(&'b self, out: &mut serialize::Output<'b, '_, diesel::sqlite::Sqlite>) -> serialize::Result { todo!() }
+/// # }
+/// # #[cfg(feature = "postgres")]
+/// # impl FromSql<MyInteger, diesel::pg::Pg> for MyEnum {
+/// #    fn from_sql(bytes: <diesel::pg::Pg as Backend>::RawValue<'_>) -> deserialize::Result<Self> { todo!() }
+/// # }
+/// # #[cfg(feature = "mysql")]
+/// # impl FromSql<MyInteger, diesel::mysql::Mysql> for MyEnum {
+/// #    fn from_sql(bytes: <diesel::mysql::Mysql as Backend>::RawValue<'_>) -> deserialize::Result<Self> { todo!() }
+/// # }
+/// # #[cfg(feature = "sqlite")]
+/// # impl FromSql<MyInteger, diesel::sqlite::Sqlite> for MyEnum {
+/// #    fn from_sql(bytes: <diesel::sqlite::Sqlite as Backend>::RawValue<'_>) -> deserialize::Result<Self> { todo!() }
+/// # }
+/// # fn main() {}
+/// ```
 #[proc_macro_derive(MultiConnection)]
 pub fn derive_multiconnection(input: TokenStream) -> TokenStream {
     multiconnection::derive(syn::parse_macro_input!(input)).into()
@@ -1677,6 +1543,19 @@ pub fn derive_multiconnection(input: TokenStream) -> TokenStream {
 /// #     Ok(())
 /// # }
 /// ```
+/// # Limitations
+///
+/// While this attribute tries to support as much of diesels built-in DSL as possible it's
+/// unfortunately not possible to support everything. Notable unsupported types are:
+///
+/// * Update statements
+/// * Insert from select statements
+/// * Query constructed by `diesel::sql_query`
+/// * Expressions using `diesel::dsl::sql`
+///
+/// For these cases a manual type annotation is required. See the "Annotating Types" section below
+/// for details.
+///
 ///
 /// # Advanced usage
 ///
@@ -1793,3 +1672,365 @@ pub fn auto_type(
 
 const AUTO_TYPE_DEFAULT_METHOD_TYPE_CASE: dsl_auto_type::Case = dsl_auto_type::Case::UpperCamel;
 const AUTO_TYPE_DEFAULT_FUNCTION_TYPE_CASE: dsl_auto_type::Case = dsl_auto_type::Case::DoNotChange;
+
+/// Declare a sql function for use in your code.
+///
+/// Diesel only provides support for a very small number of SQL functions.
+/// This macro enables you to add additional functions from the SQL standard,
+/// as well as any custom functions your application might have.
+///
+/// The syntax for this attribute macro is designed to be applied to `extern "SQL"` blocks
+/// with function definitions. These function typically use types
+/// from [`diesel::sql_types`](../diesel/sql_types/index.html) as arguments and return types.
+/// You can use such definitions to declare bindings to unsupported SQL functions.
+///
+/// For each function in this `extern` block the macro will generate two items.
+/// A function with the name that you've given, and a module with a helper type
+/// representing the return type of your function. For example, this invocation:
+///
+/// ```ignore
+/// #[declare_sql_function]
+/// extern "SQL" {
+///     fn lower(x: Text) -> Text
+/// }
+/// ```
+///
+/// will generate this code:
+///
+/// ```ignore
+/// pub fn lower<X>(x: X) -> lower<X> {
+///     ...
+/// }
+///
+/// pub type lower<X> = ...;
+/// ```
+///
+/// Most attributes given to this macro will be put on the generated function
+/// (including doc comments).
+///
+/// # Adding Doc Comments
+///
+/// ```no_run
+/// # extern crate diesel;
+/// # use diesel::*;
+/// # use diesel::expression::functions::declare_sql_function;
+/// #
+/// # table! { crates { id -> Integer, name -> VarChar, } }
+/// #
+/// use diesel::sql_types::Text;
+///
+/// #[declare_sql_function]
+/// extern "SQL" {
+///     /// Represents the `canon_crate_name` SQL function, created in
+///     /// migration ....
+///     fn canon_crate_name(a: Text) -> Text;
+/// }
+///
+/// # fn main() {
+/// # use self::crates::dsl::*;
+/// let target_name = "diesel";
+/// crates.filter(canon_crate_name(name).eq(canon_crate_name(target_name)));
+/// // This will generate the following SQL
+/// // SELECT * FROM crates WHERE canon_crate_name(crates.name) = canon_crate_name($1)
+/// # }
+/// ```
+///
+/// # Special Attributes
+///
+/// There are a handful of special attributes that Diesel will recognize. They
+/// are:
+///
+/// - `#[aggregate]`
+///   - Indicates that this is an aggregate function, and that `NonAggregate`
+///     shouldn't be implemented.
+/// - `#[sql_name = "name"]`
+///   - The SQL to be generated is different from the Rust name of the function.
+///     This can be used to represent functions which can take many argument
+///     types, or to capitalize function names.
+///
+/// Functions can also be generic. Take the definition of `sum`, for example:
+///
+/// ```no_run
+/// # extern crate diesel;
+/// # use diesel::*;
+/// # use diesel::expression::functions::declare_sql_function;
+/// #
+/// # table! { crates { id -> Integer, name -> VarChar, } }
+/// #
+/// use diesel::sql_types::Foldable;
+///
+/// #[declare_sql_function]
+/// extern "SQL" {
+///     #[aggregate]
+///     #[sql_name = "SUM"]
+///     fn sum<ST: Foldable>(expr: ST) -> ST::Sum;
+/// }
+///
+/// # fn main() {
+/// # use self::crates::dsl::*;
+/// crates.select(sum(id));
+/// # }
+/// ```
+///
+/// # SQL Functions without Arguments
+///
+/// A common example is ordering a query using the `RANDOM()` sql function,
+/// which can be implemented using `define_sql_function!` like this:
+///
+/// ```rust
+/// # extern crate diesel;
+/// # use diesel::*;
+/// # use diesel::expression::functions::declare_sql_function;
+/// #
+/// # table! { crates { id -> Integer, name -> VarChar, } }
+/// #
+/// #[declare_sql_function]
+/// extern "SQL" {
+///     fn random() -> Text;
+/// }
+///
+/// # fn main() {
+/// # use self::crates::dsl::*;
+/// crates.order(random());
+/// # }
+/// ```
+///
+/// # Use with SQLite
+///
+/// On most backends, the implementation of the function is defined in a
+/// migration using `CREATE FUNCTION`. On SQLite, the function is implemented in
+/// Rust instead. You must call `register_impl` or
+/// `register_nondeterministic_impl` (in the generated function's `_internals`
+/// module) with every connection before you can use the function.
+///
+/// These functions will only be generated if the `sqlite` feature is enabled,
+/// and the function is not generic.
+/// SQLite doesn't support generic functions and variadic functions.
+///
+/// ```rust
+/// # extern crate diesel;
+/// # use diesel::*;
+/// # use diesel::expression::functions::declare_sql_function;
+/// #
+/// # #[cfg(feature = "sqlite")]
+/// # fn main() {
+/// #     run_test().unwrap();
+/// # }
+/// #
+/// # #[cfg(not(feature = "sqlite"))]
+/// # fn main() {
+/// # }
+/// #
+/// use diesel::sql_types::{Integer, Double};
+///
+/// #[declare_sql_function]
+/// extern "SQL" {
+///     fn add_mul(x: Integer, y: Integer, z: Double) -> Double;
+/// }
+///
+/// # #[cfg(feature = "sqlite")]
+/// # fn run_test() -> Result<(), Box<dyn std::error::Error>> {
+/// let connection = &mut SqliteConnection::establish(":memory:")?;
+///
+/// add_mul_utils::register_impl(connection, |x: i32, y: i32, z: f64| {
+///     (x + y) as f64 * z
+/// })?;
+///
+/// let result = select(add_mul(1, 2, 1.5))
+///     .get_result::<f64>(connection)?;
+/// assert_eq!(4.5, result);
+/// #     Ok(())
+/// # }
+/// ```
+///
+/// ## Panics
+///
+/// If an implementation of the custom function panics and unwinding is enabled, the panic is
+/// caught and the function returns to libsqlite with an error. It can't propagate the panics due
+/// to the FFI boundary.
+///
+/// This is the same for [custom aggregate functions](#custom-aggregate-functions).
+///
+/// ## Custom Aggregate Functions
+///
+/// Custom aggregate functions can be created in SQLite by adding an `#[aggregate]`
+/// attribute inside `define_sql_function`. `register_impl` (in the generated function's `_utils`
+/// module) needs to be called with a type implementing the
+/// [SqliteAggregateFunction](../diesel/sqlite/trait.SqliteAggregateFunction.html)
+/// trait as a type parameter as shown in the examples below.
+///
+/// ```rust
+/// # extern crate diesel;
+/// # use diesel::*;
+/// # use diesel::expression::functions::declare_sql_function;
+/// #
+/// # #[cfg(feature = "sqlite")]
+/// # fn main() {
+/// #   run().unwrap();
+/// # }
+/// #
+/// # #[cfg(not(feature = "sqlite"))]
+/// # fn main() {
+/// # }
+/// use diesel::sql_types::Integer;
+/// # #[cfg(feature = "sqlite")]
+/// use diesel::sqlite::SqliteAggregateFunction;
+///
+/// #[declare_sql_function]
+/// extern "SQL" {
+///     #[aggregate]
+///     fn my_sum(x: Integer) -> Integer;
+/// }
+///
+/// #[derive(Default)]
+/// struct MySum { sum: i32 }
+///
+/// # #[cfg(feature = "sqlite")]
+/// impl SqliteAggregateFunction<i32> for MySum {
+///     type Output = i32;
+///
+///     fn step(&mut self, expr: i32) {
+///         self.sum += expr;
+///     }
+///
+///     fn finalize(aggregator: Option<Self>) -> Self::Output {
+///         aggregator.map(|a| a.sum).unwrap_or_default()
+///     }
+/// }
+/// # table! {
+/// #     players {
+/// #         id -> Integer,
+/// #         score -> Integer,
+/// #     }
+/// # }
+///
+/// # #[cfg(feature = "sqlite")]
+/// fn run() -> Result<(), Box<dyn (::std::error::Error)>> {
+/// #    use self::players::dsl::*;
+///     let connection = &mut SqliteConnection::establish(":memory:")?;
+/// #    diesel::sql_query("create table players (id integer primary key autoincrement, score integer)")
+/// #        .execute(connection)
+/// #        .unwrap();
+/// #    diesel::sql_query("insert into players (score) values (10), (20), (30)")
+/// #        .execute(connection)
+/// #        .unwrap();
+///
+///     my_sum_utils::register_impl::<MySum, _>(connection)?;
+///
+///     let total_score = players.select(my_sum(score))
+///         .get_result::<i32>(connection)?;
+///
+///     println!("The total score of all the players is: {}", total_score);
+///
+/// #    assert_eq!(60, total_score);
+///     Ok(())
+/// }
+/// ```
+///
+/// With multiple function arguments, the arguments are passed as a tuple to `SqliteAggregateFunction`
+///
+/// ```rust
+/// # extern crate diesel;
+/// # use diesel::*;
+/// # use diesel::expression::functions::declare_sql_function;
+/// #
+/// # #[cfg(feature = "sqlite")]
+/// # fn main() {
+/// #   run().unwrap();
+/// # }
+/// #
+/// # #[cfg(not(feature = "sqlite"))]
+/// # fn main() {
+/// # }
+/// use diesel::sql_types::{Float, Nullable};
+/// # #[cfg(feature = "sqlite")]
+/// use diesel::sqlite::SqliteAggregateFunction;
+///
+/// #[declare_sql_function]
+/// extern "SQL" {
+///     #[aggregate]
+///     fn range_max(x0: Float, x1: Float) -> Nullable<Float>;
+/// }
+///
+/// #[derive(Default)]
+/// struct RangeMax<T> { max_value: Option<T> }
+///
+/// # #[cfg(feature = "sqlite")]
+/// impl<T: Default + PartialOrd + Copy + Clone> SqliteAggregateFunction<(T, T)> for RangeMax<T> {
+///     type Output = Option<T>;
+///
+///     fn step(&mut self, (x0, x1): (T, T)) {
+/// #        let max = if x0 >= x1 {
+/// #            x0
+/// #        } else {
+/// #            x1
+/// #        };
+/// #
+/// #        self.max_value = match self.max_value {
+/// #            Some(current_max_value) if max > current_max_value => Some(max),
+/// #            None => Some(max),
+/// #            _ => self.max_value,
+/// #        };
+///         // Compare self.max_value to x0 and x1
+///     }
+///
+///     fn finalize(aggregator: Option<Self>) -> Self::Output {
+///         aggregator?.max_value
+///     }
+/// }
+/// # table! {
+/// #     student_avgs {
+/// #         id -> Integer,
+/// #         s1_avg -> Float,
+/// #         s2_avg -> Float,
+/// #     }
+/// # }
+///
+/// # #[cfg(feature = "sqlite")]
+/// fn run() -> Result<(), Box<dyn (::std::error::Error)>> {
+/// #    use self::student_avgs::dsl::*;
+///     let connection = &mut SqliteConnection::establish(":memory:")?;
+/// #    diesel::sql_query("create table student_avgs (id integer primary key autoincrement, s1_avg float, s2_avg float)")
+/// #       .execute(connection)
+/// #       .unwrap();
+/// #    diesel::sql_query("insert into student_avgs (s1_avg, s2_avg) values (85.5, 90), (79.8, 80.1)")
+/// #        .execute(connection)
+/// #        .unwrap();
+///
+///     range_max_utils::register_impl::<RangeMax<f32>, _, _>(connection)?;
+///
+///     let result = student_avgs.select(range_max(s1_avg, s2_avg))
+///         .get_result::<Option<f32>>(connection)?;
+///
+///     if let Some(max_semester_avg) = result {
+///         println!("The largest semester average is: {}", max_semester_avg);
+///     }
+///
+/// #    assert_eq!(Some(90f32), result);
+///     Ok(())
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn declare_sql_function(
+    _attr: proc_macro::TokenStream,
+    input: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    let input = proc_macro2::TokenStream::from(input);
+    let result = syn::parse2::<ExternSqlBlock>(input.clone()).map(|res| {
+        let expanded = res
+            .function_decls
+            .into_iter()
+            .map(|decl| sql_function::expand(decl, false));
+        quote::quote! {
+            #(#expanded)*
+        }
+    });
+    match result {
+        Ok(token_stream) => token_stream.into(),
+        Err(e) => {
+            let mut output = input;
+            output.extend(e.into_compile_error());
+            output.into()
+        }
+    }
+}

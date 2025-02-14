@@ -1,6 +1,13 @@
 //! Helper macros to define custom sql functions
 
 #[doc(inline)]
+pub use diesel_derives::declare_sql_function;
+
+#[doc(inline)]
+pub use diesel_derives::define_sql_function;
+
+#[doc(inline)]
+#[cfg(all(feature = "with-deprecated", not(feature = "without-deprecated")))]
 pub use diesel_derives::sql_function_proc as sql_function;
 
 #[macro_export]
@@ -73,7 +80,7 @@ macro_rules! no_arg_sql_function_body {
 /// function.
 #[deprecated(
     since = "2.0.0",
-    note = "Use `sql_function!` instead. See `CHANGELOG.md` for migration instructions"
+    note = "Use `define_sql_function!` instead. See `CHANGELOG.md` for migration instructions"
 )]
 #[cfg(all(feature = "with-deprecated", not(feature = "without-deprecated")))]
 macro_rules! no_arg_sql_function {
