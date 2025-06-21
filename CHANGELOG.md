@@ -2,7 +2,9 @@
 
 All user visible changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/), as described
-for Rust libraries in [RFC #1105](https://github.com/rust-lang/rfcs/blob/master/text/1105-api-evolution.md)
+for Rust libraries in [RFC #1105](https://github.com/rust-lang/rfcs/blob/master/text/1105-api-evolution.md). 
+We explicitly reserve the right to perform breaking changes in minor releases to fix build breaking changes 
+from the Rust project. 
 For any named minimal supported Rust version we guarantee that it is possible to build Diesel with the
 default features enabled using some set of dependencies. Those set of dependencies is not necessarily
 an up to date version of the specific dependency. We check this by using the unstable `-Z minimal-version` cargo flag.
@@ -16,7 +18,7 @@ Increasing the minimal supported Rust version will always be coupled at least wi
 * Fixed `#[derive(Identifiable)]` ignoring attribute `#[diesel(serialize_as)]` on primary keys
 * Added embedded struct support for `AsChangeset` via `#[diesel(embed)]`
 * Added a `#[diesel(skip_update)]` attribute for the `AsChangeset` derive to skip updating a field present in the struct
-* Support for libsqlite3-sys 0.33.0
+* Support for libsqlite3-sys 0.34.0
 * Add support for built-in PostgreSQL range operators and functions
 * Support for postgres multirange type
 * Added `diesel::r2d2::TestCustomizer`, which allows users to customize their `diesel::r2d2::Pool`s
